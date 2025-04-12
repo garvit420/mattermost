@@ -1,4 +1,4 @@
-.PHONY: build package run stop run-client run-server run-node run-haserver stop-haserver stop-client stop-server restart restart-server restart-client restart-haserver start-docker update-docker clean-dist clean nuke check-style check-client-style check-server-style check-unit-tests test dist run-client-tests setup-run-client-tests cleanup-run-client-tests test-client build-linux build-osx build-windows package-prep package-linux package-osx package-windows internal-test-web-client vet run-server-for-web-client-tests diff-config prepackaged-plugins prepackaged-binaries test-server test-server-ee test-server-quick test-server-race test-mmctl-unit test-mmctl-e2e test-mmctl test-mmctl-coverage mmctl-build mmctl-docs new-migration migrations-extract test-public mocks-public
+.PHONY: build package run stop run-client run-server run-node run-haserver run-enhanced-haserver stop-haserver stop-enhanced-haserver stop-client stop-server restart restart-server restart-client restart-haserver restart-enhanced-haserver start-docker update-docker clean-dist clean nuke check-style check-client-style check-server-style check-unit-tests test dist run-client-tests setup-run-client-tests cleanup-run-client-tests test-client build-linux build-osx build-windows package-prep package-linux package-osx package-windows internal-test-web-client vet run-server-for-web-client-tests diff-config prepackaged-plugins prepackaged-binaries test-server test-server-ee test-server-quick test-server-race test-mmctl-unit test-mmctl-e2e test-mmctl test-mmctl-coverage mmctl-build mmctl-docs new-migration migrations-extract test-public mocks-public ha-healthcheck
 
 ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -857,3 +857,27 @@ test-migration:
 
 test-local-filestore: # Run tests for local filestore
 	$(GO) test ./platform/shared/filestore -run '^TestLocalFileBackend' -v
+
+run-enhanced-haserver:
+ifeq ($(BUILD_ENTERPRISE_READY),true)
+	@echo Starting mattermost in an Enhanced HA topology '(redis, s3, db replication)'
+
+	docker compose -f docker-compose.ha.yml up --remove-orphans
+endif
+
+stop-enhanced-haserver:
+	@echo Stopping docker containers for Enhanced HA topology
+	docker compose -f docker-compose.ha.yml down
+
+restart-enhanced-haserver:
+	@echo Restarting mattermost in an Enhanced HA topology
+
+	docker compose -f docker-compose.ha.yml restart follower2
+	docker compose -f docker-compose.ha.yml restart follower
+	docker compose -f docker-compose.ha.yml restart leader
+	docker compose -f docker-compose.ha.yml restart haproxy
+
+ha-healthcheck: ## Run a health check on the HA cluster
+	@echo Running health check on HA cluster
+	@chmod +x ./build/docker/healthcheck.sh
+	@./build/docker/healthcheck.sh

@@ -1,0 +1,267 @@
+version: '3'
+
+services:
+  # Load Balancer
+  haproxy:
+    image: nginx
+    volumes:
+      - ./build/docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "8065:8065"
+    networks:
+      - mm-test
+    depends_on:
+      - leader
+      - follower
+      - follower2
+    restart: on-failure
+
+  # Database (PostgreSQL with replication)
+  postgres-primary:
+    image: "postgres:13"
+    restart: always
+    networks:
+      - mm-test
+    environment:
+      POSTGRES_USER: mmuser
+      POSTGRES_PASSWORD: mostest
+      POSTGRES_DB: mattermost_test
+    volumes:
+     - "./build/docker/postgres.conf:/etc/postgresql/postgresql.conf"
+     - "./data/postgres-primary:/var/lib/postgresql/data"
+    command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost"]
+      interval: 5s
+      timeout: 10s
+      retries: 3
+
+  postgres-replica:
+    image: "postgres:13"
+    restart: always
+    networks:
+      - mm-test
+    environment:
+      POSTGRES_USER: mmuser
+      POSTGRES_PASSWORD: mostest
+      POSTGRES_DB: mattermost_test
+    volumes:
+     - "./build/docker/postgres.conf:/etc/postgresql/postgresql.conf"
+     - "./build/docker/postgres-replica-setup.sh:/docker-entrypoint-initdb.d/postgres-replica-setup.sh"
+     - "./data/postgres-replica:/var/lib/postgresql/data"
+    command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
+    depends_on:
+      - postgres-primary
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost"]
+      interval: 5s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cluster for Session and Pub/Sub
+  redis-master:
+    image: "redis:7.4.0"
+    networks:
+      - mm-test
+    ports:
+      - "6379:6379"
+    volumes:
+      - "./data/redis-master:/data"
+    command: redis-server --appendonly yes
+
+  redis-replica-1:
+    image: "redis:7.4.0"
+    networks:
+      - mm-test
+    volumes:
+      - "./data/redis-replica-1:/data"
+    command: redis-server --appendonly yes --replicaof redis-master 6379
+    depends_on:
+      - redis-master
+
+  redis-replica-2:
+    image: "redis:7.4.0"
+    networks:
+      - mm-test
+    volumes:
+      - "./data/redis-replica-2:/data"
+    command: redis-server --appendonly yes --replicaof redis-master 6379
+    depends_on:
+      - redis-master
+
+  # S3-compatible Object Storage
+  minio:
+    image: "minio/minio:RELEASE.2024-06-22T05-26-45Z"
+    command: "server /data --console-address :9002"
+    networks:
+      - mm-test
+    environment:
+      MINIO_ROOT_USER: minioaccesskey
+      MINIO_ROOT_PASSWORD: miniosecretkey
+    volumes:
+      - "./data/minio:/data"
+    ports:
+      - "9000:9000"
+      - "9002:9002"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio-init:
+    image: "ubuntu:22.04"
+    networks:
+      - mm-test
+    depends_on:
+      - minio
+    volumes:
+      - "./build/docker/minio-init.sh:/minio-init.sh"
+    command: ["/bin/bash", "/minio-init.sh"]
+    restart: on-failure
+
+  # Mattermost Nodes
+  leader:
+    build:
+      context: .
+      dockerfile: ./build/Dockerfile.buildenv
+    working_dir: '/home/mattermost-server/server'
+    environment:
+      - "MM_SQLSETTINGS_DRIVERNAME=postgres"
+      - "MM_SQLSETTINGS_DATASOURCE=postgres://mmuser:mostest@postgres-primary/mattermost_test?sslmode=disable&connect_timeout=10"
+      - "MM_CLUSTERSETTINGS_ENABLE=true"
+      - "MM_CLUSTERSETTINGS_CLUSTERNAME=mm_ha_cluster"
+      - "MM_CLUSTERSETTINGS_USEIPADDRESS=true"
+      - "MM_LOGSETTINGS_FILELOCATION=./logs/leader"
+      - "MM_FILESETTINGS_DRIVERNAME=amazons3"
+      - "MM_FILESETTINGS_AMAZONS3BUCKET=mattermost-uploads"
+      - "MM_FILESETTINGS_AMAZONS3ENDPOINT=minio:9000"
+      - "MM_FILESETTINGS_AMAZONS3SSL=false"
+      - "MM_FILESETTINGS_AMAZONS3ACCESSKEYID=minioaccesskey"
+      - "MM_FILESETTINGS_AMAZONS3SECRETACCESSKEY=miniosecretkey"
+      - "MM_CACHESETTINGS_CACHETYPE=redis"
+      - "MM_CACHESETTINGS_REDISADDRESS=redis-master:6379"
+      - "MM_NOTIFICATIONLOGSETTINGS_FILELOCATION=./logs/leader"
+      - "MM_MESSAGEEXPORTSETTINGS_EXPORTFROMALLSERVERS=true"
+    networks:
+      - mm-test
+    depends_on:
+      - postgres-primary
+      - redis-master
+      - minio
+      - minio-init
+    volumes:
+      - './../:/home/mattermost-server'
+      - './../../enterprise:/home/enterprise'
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://leader:8065/api/v4/system/ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 1m
+    user: ${CURRENT_UID}
+    command: ['make', 'run-server']
+    expose:
+      - "8065"
+      - "8074/tcp"
+      - "8074/udp"
+      - "8075"
+
+  follower:
+    build:
+      context: .
+      dockerfile: ./build/Dockerfile.buildenv
+    working_dir: '/home/mattermost-server/server'
+    environment:
+      - "MM_SQLSETTINGS_DRIVERNAME=postgres"
+      - "MM_SQLSETTINGS_DATASOURCE=postgres://mmuser:mostest@postgres-primary/mattermost_test?sslmode=disable&connect_timeout=10"
+      - "MM_CLUSTERSETTINGS_ENABLE=true"
+      - "MM_CLUSTERSETTINGS_CLUSTERNAME=mm_ha_cluster"
+      - "MM_CLUSTERSETTINGS_USEIPADDRESS=true"
+      - "MM_LOGSETTINGS_FILELOCATION=./logs/follower"
+      - "MM_FILESETTINGS_DRIVERNAME=amazons3"
+      - "MM_FILESETTINGS_AMAZONS3BUCKET=mattermost-uploads"
+      - "MM_FILESETTINGS_AMAZONS3ENDPOINT=minio:9000"
+      - "MM_FILESETTINGS_AMAZONS3SSL=false"
+      - "MM_FILESETTINGS_AMAZONS3ACCESSKEYID=minioaccesskey"
+      - "MM_FILESETTINGS_AMAZONS3SECRETACCESSKEY=miniosecretkey"
+      - "MM_CACHESETTINGS_CACHETYPE=redis"
+      - "MM_CACHESETTINGS_REDISADDRESS=redis-master:6379"
+      - "MM_NOTIFICATIONLOGSETTINGS_FILELOCATION=./logs/follower"
+      - "MM_MESSAGEEXPORTSETTINGS_EXPORTFROMALLSERVERS=true"
+    networks:
+      - mm-test
+    depends_on:
+      - leader
+      - postgres-primary
+      - redis-master
+      - minio
+    volumes:
+      - './../:/home/mattermost-server'
+      - './../../enterprise:/home/enterprise'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://follower:8065/api/v4/system/ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 1m
+    user: ${CURRENT_UID}
+    command: ['make', 'run-server']
+    restart: on-failure
+    expose:
+      - "8065"
+      - "8074/tcp"
+      - "8074/udp"
+      - "8075"
+
+  follower2:
+    build:
+      context: .
+      dockerfile: ./build/Dockerfile.buildenv
+    working_dir: '/home/mattermost-server/server'
+    environment:
+      - "MM_SQLSETTINGS_DRIVERNAME=postgres"
+      - "MM_SQLSETTINGS_DATASOURCE=postgres://mmuser:mostest@postgres-primary/mattermost_test?sslmode=disable&connect_timeout=10"
+      - "MM_CLUSTERSETTINGS_ENABLE=true"
+      - "MM_CLUSTERSETTINGS_CLUSTERNAME=mm_ha_cluster"
+      - "MM_CLUSTERSETTINGS_USEIPADDRESS=true"
+      - "MM_LOGSETTINGS_FILELOCATION=./logs/follower2"
+      - "MM_FILESETTINGS_DRIVERNAME=amazons3"
+      - "MM_FILESETTINGS_AMAZONS3BUCKET=mattermost-uploads"
+      - "MM_FILESETTINGS_AMAZONS3ENDPOINT=minio:9000"
+      - "MM_FILESETTINGS_AMAZONS3SSL=false"
+      - "MM_FILESETTINGS_AMAZONS3ACCESSKEYID=minioaccesskey"
+      - "MM_FILESETTINGS_AMAZONS3SECRETACCESSKEY=miniosecretkey"
+      - "MM_CACHESETTINGS_CACHETYPE=redis"
+      - "MM_CACHESETTINGS_REDISADDRESS=redis-master:6379"
+      - "MM_NOTIFICATIONLOGSETTINGS_FILELOCATION=./logs/follower2"
+      - "MM_MESSAGEEXPORTSETTINGS_EXPORTFROMALLSERVERS=true"
+    networks:
+      - mm-test
+    depends_on:
+      - leader
+      - postgres-primary
+      - redis-master
+      - minio
+    volumes:
+      - './../:/home/mattermost-server'
+      - './../../enterprise:/home/enterprise'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://follower2:8065/api/v4/system/ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 1m
+    user: ${CURRENT_UID}
+    command: ['make', 'run-server']
+    restart: on-failure
+    expose:
+      - "8065"
+      - "8074/tcp"
+      - "8074/udp"
+      - "8075"
+
+networks:
+  mm-test:
+    driver: bridge 

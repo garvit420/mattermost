@@ -151,7 +151,6 @@ junit.xml
 __debug_bin
 report.xml
 go.*.orig
-config.override.mk
 docker-compose.override.yaml
 
 ## Notice Folders
