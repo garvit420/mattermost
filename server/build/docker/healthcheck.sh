@@ -3,12 +3,13 @@
 
 # Configuration
 MATTERMOST_URL="http://localhost:8065"
-REDIS_HOST="redis-master"
+REDIS_NODES=("redis-node-0" "redis-node-1" "redis-node-2")
 REDIS_PORT="6379"
-POSTGRES_HOST="postgres-primary"
+POSTGRES_PRIMARY="postgres-primary"
+POSTGRES_REPLICA="postgres-replica"
 POSTGRES_PORT="5432"
 MINIO_URL="http://minio:9000"
-NODES=("leader" "follower" "follower2")
+MATTERMOST_NODES=("leader" "follower" "follower2")
 
 # Output color
 RED='\033[0;31m'
@@ -32,93 +33,130 @@ check_service() {
     fi
 }
 
-# Function to check Mattermost node health
-check_mattermost_node() {
-    local node=$1
-    local url="http://$node:8065/api/v4/system/ping"
+# Function to check Redis Cluster status
+check_redis_cluster() {
+    local primary_node=$1
     
-    curl -s -f $url > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}[✓] Mattermost node $node is healthy${NC}"
+    if ! check_service $primary_node $REDIS_PORT "Redis Node ($primary_node)"; then
+        return 1
+    fi
+    
+    # Check cluster status
+    local cluster_state=$(redis-cli -h $primary_node CLUSTER INFO | grep cluster_state | cut -d':' -f2 | tr -d '\r')
+    if [ "$cluster_state" == "ok" ]; then
+        echo -e "${GREEN}[✓] Redis Cluster state is OK${NC}"
+        
+        # Check number of nodes
+        local cluster_size=$(redis-cli -h $primary_node CLUSTER NODES | wc -l)
+        echo -e "${GREEN}[✓] Redis Cluster size: $cluster_size nodes${NC}"
+        
         return 0
     else
-        echo -e "${RED}[✗] Mattermost node $node is unhealthy${NC}"
+        echo -e "${RED}[✗] Redis Cluster is not in 'ok' state ($cluster_state)${NC}"
         return 1
     fi
 }
 
-# Function to check Redis replication status
-check_redis_replication() {
-    echo "Checking Redis replication status..."
-    redis-cli -h $REDIS_HOST -p $REDIS_PORT info replication | grep -E "role|connected_slaves|slave0|slave1"
-    if redis-cli -h $REDIS_HOST -p $REDIS_PORT info replication | grep -q "role:master"; then
-        echo -e "${GREEN}[✓] Redis master is functioning${NC}"
+# Function to check Mattermost health
+check_mattermost() {
+    curl -s -o /dev/null -w "%{http_code}" $MATTERMOST_URL/api/v4/system/ping 2>/dev/null | grep -q "200"
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}[✓] Mattermost is responding to health checks${NC}"
+        return 0
     else
-        echo -e "${RED}[✗] Redis master issue detected${NC}"
+        echo -e "${RED}[✗] Mattermost is not responding to health checks${NC}"
+        return 1
     fi
 }
 
-# Function to check PostgreSQL replication status
-check_postgres_replication() {
-    echo "Checking PostgreSQL replication status..."
-    PGPASSWORD=mostest psql -h $POSTGRES_HOST -U mmuser -d mattermost_test -c "SELECT * FROM pg_stat_replication;" 2>/dev/null
+# Function to check PostgreSQL health
+check_postgres() {
+    local host=$1
+    local user="mmuser"
+    local db="mattermost_test"
+    
+    if ! check_service $host $POSTGRES_PORT "PostgreSQL ($host)"; then
+        return 1
+    fi
+    
+    # Check if psql is available
+    which psql > /dev/null
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}[!] psql not found. Cannot perform advanced PostgreSQL checks${NC}"
+        return 0
+    fi
+    
+    # Try to connect to the database
+    PGPASSWORD=mostest psql -h $host -U $user -d $db -c "SELECT 1" > /dev/null 2>&1
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}[✓] PostgreSQL replication is configured${NC}"
+        echo -e "${GREEN}[✓] PostgreSQL ($host) connection successful${NC}"
+        return 0
     else
-        echo -e "${RED}[✗] PostgreSQL replication issue detected${NC}"
+        echo -e "${RED}[✗] Cannot connect to PostgreSQL ($host) database${NC}"
+        return 1
     fi
 }
 
 # Function to check MinIO health
-check_minio_health() {
-    curl -s -f $MINIO_URL/minio/health/live > /dev/null 2>&1
+check_minio() {
+    curl -s -o /dev/null -w "%{http_code}" $MINIO_URL/minio/health/live 2>/dev/null | grep -q "200"
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}[✓] MinIO is healthy${NC}"
         return 0
     else
-        echo -e "${RED}[✗] MinIO is unhealthy${NC}"
+        echo -e "${RED}[✗] MinIO is not responding to health checks${NC}"
         return 1
     fi
 }
 
-# Function to check Mattermost cluster status
-check_mattermost_cluster() {
-    echo "Checking Mattermost cluster status..."
-    docker compose -f docker-compose.ha.yml exec leader mmctl --local system status 2>/dev/null
+# Function to check Mattermost node health
+check_mattermost_node() {
+    local node=$1
+    
+    if ! check_service $node 8065 "Mattermost node ($node)"; then
+        return 1
+    fi
+    
+    # Check node health via API
+    curl -s -o /dev/null -w "%{http_code}" http://$node:8065/api/v4/system/ping 2>/dev/null | grep -q "200"
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}[✓] Mattermost cluster appears to be functioning${NC}"
+        echo -e "${GREEN}[✓] Mattermost node ($node) is healthy${NC}"
+        return 0
     else
-        echo -e "${YELLOW}[!] Could not retrieve Mattermost cluster status${NC}"
+        echo -e "${RED}[✗] Mattermost node ($node) is not responding to health checks${NC}"
+        return 1
     fi
 }
 
-# Main health check logic
-echo "================================="
-echo " Mattermost HA Cluster Health Check"
-echo "================================="
+# Main health check
+echo "===================================="
+echo "Mattermost HA Cluster Health Check"
+echo "===================================="
 echo ""
 
-echo "Checking core services..."
-check_service $REDIS_HOST $REDIS_PORT "Redis"
-check_service $POSTGRES_HOST $POSTGRES_PORT "PostgreSQL"
-check_minio_health
-
+echo "Checking Redis Cluster..."
+check_redis_cluster ${REDIS_NODES[0]}
 echo ""
+
+echo "Checking PostgreSQL..."
+check_postgres $POSTGRES_PRIMARY
+check_postgres $POSTGRES_REPLICA
+echo ""
+
+echo "Checking MinIO..."
+check_minio
+echo ""
+
 echo "Checking Mattermost nodes..."
-for node in "${NODES[@]}"; do
+for node in "${MATTERMOST_NODES[@]}"; do
     check_mattermost_node $node
 done
-
 echo ""
-echo "Checking replication status..."
-check_redis_replication
-check_postgres_replication
 
+echo "Checking overall Mattermost service..."
+check_mattermost
 echo ""
-echo "Checking cluster status..."
-check_mattermost_cluster
 
-echo ""
-echo "================================="
-echo " Health Check Complete"
-echo "=================================" 
+echo "===================================="
+echo "Health check completed"
+echo "====================================" 

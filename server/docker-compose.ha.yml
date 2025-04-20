@@ -59,35 +59,53 @@ services:
       retries: 3
 
   # Redis Cluster for Session and Pub/Sub
-  redis-master:
+  redis-node-0:
     image: "redis:7.4.0"
     networks:
       - mm-test
+    volumes:
+      - "./data/redis-node-0:/data"
+    command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --appendonly yes --port 6379
     ports:
       - "6379:6379"
-    volumes:
-      - "./data/redis-master:/data"
-    command: redis-server --appendonly yes
 
-  redis-replica-1:
+  redis-node-1:
     image: "redis:7.4.0"
     networks:
       - mm-test
     volumes:
-      - "./data/redis-replica-1:/data"
-    command: redis-server --appendonly yes --replicaof redis-master 6379
+      - "./data/redis-node-1:/data"
+    command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --appendonly yes --port 6379
+    ports:
+      - "6380:6379"
     depends_on:
-      - redis-master
+      - redis-node-0
 
-  redis-replica-2:
+  redis-node-2:
     image: "redis:7.4.0"
     networks:
       - mm-test
     volumes:
-      - "./data/redis-replica-2:/data"
-    command: redis-server --appendonly yes --replicaof redis-master 6379
+      - "./data/redis-node-2:/data"
+    command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --appendonly yes --port 6379
+    ports:
+      - "6381:6379"
     depends_on:
-      - redis-master
+      - redis-node-0
+      - redis-node-1
+
+  redis-cluster-init:
+    image: "redis:7.4.0"
+    networks:
+      - mm-test
+    depends_on:
+      - redis-node-0
+      - redis-node-1
+      - redis-node-2
+    volumes:
+      - "./build/docker/redis-cluster-init.sh:/redis-cluster-init.sh"
+    command: ["/bin/bash", "/redis-cluster-init.sh"]
+    restart: on-failure
 
   # S3-compatible Object Storage
   minio:
@@ -139,15 +157,23 @@ services:
       - "MM_FILESETTINGS_AMAZONS3SSL=false"
       - "MM_FILESETTINGS_AMAZONS3ACCESSKEYID=minioaccesskey"
       - "MM_FILESETTINGS_AMAZONS3SECRETACCESSKEY=miniosecretkey"
-      - "MM_CACHESETTINGS_CACHETYPE=redis"
-      - "MM_CACHESETTINGS_REDISADDRESS=redis-master:6379"
+      - "MM_REDISSETTINGS_ENABLE=true"
+      - "MM_REDISSETTINGS_CLUSTERADDRESSES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379"
+      - "MM_REDISSETTINGS_POOLTIMEOUTSECONDS=3"
+      - "MM_REDISSETTINGS_CONNECTTIMEOUTMS=3000"
+      - "MM_REDISSETTINGS_READTIMEOUTMS=3000"
+      - "MM_REDISSETTINGS_WRITETIMEOUTMS=3000"
+      - "MM_REDISSETTINGS_POOLSIZE=30"
       - "MM_NOTIFICATIONLOGSETTINGS_FILELOCATION=./logs/leader"
       - "MM_MESSAGEEXPORTSETTINGS_EXPORTFROMALLSERVERS=true"
     networks:
       - mm-test
     depends_on:
       - postgres-primary
-      - redis-master
+      - redis-node-0
+      - redis-node-1
+      - redis-node-2
+      - redis-cluster-init
       - minio
       - minio-init
     volumes:
@@ -186,8 +212,13 @@ services:
       - "MM_FILESETTINGS_AMAZONS3SSL=false"
       - "MM_FILESETTINGS_AMAZONS3ACCESSKEYID=minioaccesskey"
       - "MM_FILESETTINGS_AMAZONS3SECRETACCESSKEY=miniosecretkey"
-      - "MM_CACHESETTINGS_CACHETYPE=redis"
-      - "MM_CACHESETTINGS_REDISADDRESS=redis-master:6379"
+      - "MM_REDISSETTINGS_ENABLE=true"
+      - "MM_REDISSETTINGS_CLUSTERADDRESSES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379"
+      - "MM_REDISSETTINGS_POOLTIMEOUTSECONDS=3"
+      - "MM_REDISSETTINGS_CONNECTTIMEOUTMS=3000"
+      - "MM_REDISSETTINGS_READTIMEOUTMS=3000"
+      - "MM_REDISSETTINGS_WRITETIMEOUTMS=3000"
+      - "MM_REDISSETTINGS_POOLSIZE=30"
       - "MM_NOTIFICATIONLOGSETTINGS_FILELOCATION=./logs/follower"
       - "MM_MESSAGEEXPORTSETTINGS_EXPORTFROMALLSERVERS=true"
     networks:
@@ -195,7 +226,10 @@ services:
     depends_on:
       - leader
       - postgres-primary
-      - redis-master
+      - redis-node-0
+      - redis-node-1
+      - redis-node-2
+      - redis-cluster-init
       - minio
     volumes:
       - './../:/home/mattermost-server'
@@ -233,8 +267,13 @@ services:
       - "MM_FILESETTINGS_AMAZONS3SSL=false"
       - "MM_FILESETTINGS_AMAZONS3ACCESSKEYID=minioaccesskey"
       - "MM_FILESETTINGS_AMAZONS3SECRETACCESSKEY=miniosecretkey"
-      - "MM_CACHESETTINGS_CACHETYPE=redis"
-      - "MM_CACHESETTINGS_REDISADDRESS=redis-master:6379"
+      - "MM_REDISSETTINGS_ENABLE=true"
+      - "MM_REDISSETTINGS_CLUSTERADDRESSES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379"
+      - "MM_REDISSETTINGS_POOLTIMEOUTSECONDS=3"
+      - "MM_REDISSETTINGS_CONNECTTIMEOUTMS=3000"
+      - "MM_REDISSETTINGS_READTIMEOUTMS=3000"
+      - "MM_REDISSETTINGS_WRITETIMEOUTMS=3000"
+      - "MM_REDISSETTINGS_POOLSIZE=30"
       - "MM_NOTIFICATIONLOGSETTINGS_FILELOCATION=./logs/follower2"
       - "MM_MESSAGEEXPORTSETTINGS_EXPORTFROMALLSERVERS=true"
     networks:
@@ -242,7 +281,10 @@ services:
     depends_on:
       - leader
       - postgres-primary
-      - redis-master
+      - redis-node-0
+      - redis-node-1
+      - redis-node-2
+      - redis-cluster-init
       - minio
     volumes:
       - './../:/home/mattermost-server'

@@ -31,16 +31,14 @@
   },
   "RedisSettings": {
     "Enable": true,
-    "Host": "redis:6379",
+    "ClusterAddresses": ["redis-node-0:6379", "redis-node-1:6379", "redis-node-2:6379"],
     "Password": "",
-    "Database": 0,
-    "CachePrefix": "mattermost_cache:",
-    "SocketPath": "",
-    "ConnectionTimeout": 3000,
-    "ReadTimeout": 3000,
-    "WriteTimeout": 3000,
-    "IdleTimeout": 300,
-    "MaxConnections": 10
+    "PoolSize": 30,
+    "PoolTimeoutSeconds": 3,
+    "ConnectTimeoutMs": 3000,
+    "ReadTimeoutMs": 3000,
+    "WriteTimeoutMs": 3000,
+    "IdleTimeoutSeconds": 300
   },
   "FileSettings": {
     "EnableFileAttachments": true,
@@ -65,8 +63,8 @@
   },
   "SqlSettings": {
     "DriverName": "postgres",
-    "DataSource": "postgres://mmuser:mostest@postgres/mattermost_test?sslmode=disable&connect_timeout=10",
-    "DataSourceReplicas": [],
+    "DataSource": "postgres://mmuser:mostest@postgres-primary/mattermost_test?sslmode=disable&connect_timeout=10",
+    "DataSourceReplicas": ["postgres://mmuser:mostest@postgres-replica/mattermost_test?sslmode=disable&connect_timeout=10"],
     "DataSourceSearchReplicas": [],
     "MaxIdleConns": 20,
     "MaxOpenConns": 300,
