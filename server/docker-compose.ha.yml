@@ -15,6 +15,11 @@ services:
       - follower
       - follower2
     restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8065/api/v4/system/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   # Database (PostgreSQL with replication)
   postgres-primary:
@@ -58,6 +63,39 @@ services:
       timeout: 10s
       retries: 3
 
+  # Database failover manager
+  patroni:
+    image: "bitnami/patroni:3.0.0"
+    networks:
+      - mm-test
+    environment:
+      PATRONI_SCOPE: mattermost
+      PATRONI_NAME: patroni
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni:5432
+      PATRONI_POSTGRESQL_DATA_DIR: /bitnami/postgresql/data
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni:8008
+      PATRONI_ETCD_HOSTS: etcd:2379
+      PATRONI_SUPERUSER_USERNAME: postgres
+      PATRONI_SUPERUSER_PASSWORD: postgres
+      PATRONI_REPLICATION_USERNAME: replicator
+      PATRONI_REPLICATION_PASSWORD: replicator
+    depends_on:
+      - postgres-primary
+      - postgres-replica
+      - etcd
+
+  # Etcd for distributed coordination
+  etcd:
+    image: "bitnami/etcd:3.5.9"
+    networks:
+      - mm-test
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+    volumes:
+      - "./data/etcd:/bitnami/etcd"
+
   # Redis Cluster for Session and Pub/Sub
   redis-node-0:
     image: "redis:7.4.0"
@@ -68,6 +106,12 @@ services:
     command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --appendonly yes --port 6379
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 3
+      start_period: 10s
 
   redis-node-1:
     image: "redis:7.4.0"
@@ -80,6 +124,12 @@ services:
       - "6380:6379"
     depends_on:
       - redis-node-0
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 3
+      start_period: 10s
 
   redis-node-2:
     image: "redis:7.4.0"
@@ -93,6 +143,12 @@ services:
     depends_on:
       - redis-node-0
       - redis-node-1
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 3
+      start_period: 10s
 
   redis-cluster-init:
     image: "redis:7.4.0"
@@ -150,7 +206,12 @@ services:
       - "MM_CLUSTERSETTINGS_ENABLE=true"
       - "MM_CLUSTERSETTINGS_CLUSTERNAME=mm_ha_cluster"
       - "MM_CLUSTERSETTINGS_USEIPADDRESS=true"
+      - "MM_CLUSTERSETTINGS_ENABLEEXPERIMENTALGOSSIPENCRYPTION=true"
+      - "MM_CLUSTERSETTINGS_ENABLEGOSSIPCOMPRESSION=true"
       - "MM_LOGSETTINGS_FILELOCATION=./logs/leader"
+      - "MM_LOGSETTINGS_ENABLECONSOLE=true"
+      - "MM_LOGSETTINGS_CONSOLEJSON=true"
+      - "MM_LOGSETTINGS_CONSOLELEVEL=INFO"
       - "MM_FILESETTINGS_DRIVERNAME=amazons3"
       - "MM_FILESETTINGS_AMAZONS3BUCKET=mattermost-uploads"
       - "MM_FILESETTINGS_AMAZONS3ENDPOINT=minio:9000"
@@ -166,6 +227,9 @@ services:
       - "MM_REDISSETTINGS_POOLSIZE=30"
       - "MM_NOTIFICATIONLOGSETTINGS_FILELOCATION=./logs/leader"
       - "MM_MESSAGEEXPORTSETTINGS_EXPORTFROMALLSERVERS=true"
+      - "MM_METRICSSETTINGS_ENABLE=true"
+      - "MM_METRICSSETTINGS_BLOCKLIST=process_start_time_seconds"
+      - "MM_METRICSSETTINGS_LISTENADDRESS=:8067"
     networks:
       - mm-test
     depends_on:
@@ -190,6 +254,7 @@ services:
     command: ['make', 'run-server']
     expose:
       - "8065"
+      - "8067"
       - "8074/tcp"
       - "8074/udp"
       - "8075"
@@ -205,7 +270,12 @@ services:
       - "MM_CLUSTERSETTINGS_ENABLE=true"
       - "MM_CLUSTERSETTINGS_CLUSTERNAME=mm_ha_cluster"
       - "MM_CLUSTERSETTINGS_USEIPADDRESS=true"
+      - "MM_CLUSTERSETTINGS_ENABLEEXPERIMENTALGOSSIPENCRYPTION=true"
+      - "MM_CLUSTERSETTINGS_ENABLEGOSSIPCOMPRESSION=true"
       - "MM_LOGSETTINGS_FILELOCATION=./logs/follower"
+      - "MM_LOGSETTINGS_ENABLECONSOLE=true"
+      - "MM_LOGSETTINGS_CONSOLEJSON=true"
+      - "MM_LOGSETTINGS_CONSOLELEVEL=INFO"
       - "MM_FILESETTINGS_DRIVERNAME=amazons3"
       - "MM_FILESETTINGS_AMAZONS3BUCKET=mattermost-uploads"
       - "MM_FILESETTINGS_AMAZONS3ENDPOINT=minio:9000"
@@ -221,6 +291,9 @@ services:
       - "MM_REDISSETTINGS_POOLSIZE=30"
       - "MM_NOTIFICATIONLOGSETTINGS_FILELOCATION=./logs/follower"
       - "MM_MESSAGEEXPORTSETTINGS_EXPORTFROMALLSERVERS=true"
+      - "MM_METRICSSETTINGS_ENABLE=true"
+      - "MM_METRICSSETTINGS_BLOCKLIST=process_start_time_seconds"
+      - "MM_METRICSSETTINGS_LISTENADDRESS=:8067"
     networks:
       - mm-test
     depends_on:
@@ -245,6 +318,7 @@ services:
     restart: on-failure
     expose:
       - "8065"
+      - "8067"
       - "8074/tcp"
       - "8074/udp"
       - "8075"
@@ -260,7 +334,12 @@ services:
       - "MM_CLUSTERSETTINGS_ENABLE=true"
       - "MM_CLUSTERSETTINGS_CLUSTERNAME=mm_ha_cluster"
       - "MM_CLUSTERSETTINGS_USEIPADDRESS=true"
+      - "MM_CLUSTERSETTINGS_ENABLEEXPERIMENTALGOSSIPENCRYPTION=true"
+      - "MM_CLUSTERSETTINGS_ENABLEGOSSIPCOMPRESSION=true"
       - "MM_LOGSETTINGS_FILELOCATION=./logs/follower2"
+      - "MM_LOGSETTINGS_ENABLECONSOLE=true"
+      - "MM_LOGSETTINGS_CONSOLEJSON=true"
+      - "MM_LOGSETTINGS_CONSOLELEVEL=INFO"
       - "MM_FILESETTINGS_DRIVERNAME=amazons3"
       - "MM_FILESETTINGS_AMAZONS3BUCKET=mattermost-uploads"
       - "MM_FILESETTINGS_AMAZONS3ENDPOINT=minio:9000"
@@ -276,6 +355,9 @@ services:
       - "MM_REDISSETTINGS_POOLSIZE=30"
       - "MM_NOTIFICATIONLOGSETTINGS_FILELOCATION=./logs/follower2"
       - "MM_MESSAGEEXPORTSETTINGS_EXPORTFROMALLSERVERS=true"
+      - "MM_METRICSSETTINGS_ENABLE=true"
+      - "MM_METRICSSETTINGS_BLOCKLIST=process_start_time_seconds"
+      - "MM_METRICSSETTINGS_LISTENADDRESS=:8067"
     networks:
       - mm-test
     depends_on:
@@ -300,9 +382,101 @@ services:
     restart: on-failure
     expose:
       - "8065"
+      - "8067"
       - "8074/tcp"
       - "8074/udp"
       - "8075"
+
+  # Monitoring services
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    volumes:
+      - ./build/docker/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./build/docker/alerts.yml:/etc/prometheus/alerts.yml
+      - ./data/prometheus:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - 9090:9090
+    networks:
+      - mm-test
+    restart: on-failure
+
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    volumes:
+      - ./build/docker/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - ./data/alertmanager:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    ports:
+      - 9093:9093
+    networks:
+      - mm-test
+    restart: on-failure
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    depends_on:
+      - prometheus
+    ports:
+      - 3000:3000
+    volumes:
+      - ./data/grafana:/var/lib/grafana
+      - ./build/docker/grafana/provisioning:/etc/grafana/provisioning
+      - ./build/docker/grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    networks:
+      - mm-test
+    restart: on-failure
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.56.0
+    environment:
+      - REDIS_ADDR=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379
+    networks:
+      - mm-test
+    restart: on-failure
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.14.0
+    environment:
+      - DATA_SOURCE_NAME=postgresql://mmuser:mostest@postgres-primary:5432/mattermost_test?sslmode=disable
+    networks:
+      - mm-test
+    restart: on-failure
+
+  node-exporter:
+    image: prom/node-exporter:v1.6.1
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    networks:
+      - mm-test
+    restart: on-failure
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      - mm-test
+    restart: on-failure
 
 networks:
   mm-test:

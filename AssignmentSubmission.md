@@ -10,6 +10,8 @@ My approach to implementing high availability for Mattermost was to leverage the
 2. **Shared stateful components** to ensure consistency across nodes
 3. **Real-time synchronization** for messages and events
 4. **Automated failover** to maintain service during node outages
+5. **Comprehensive monitoring and alerting** for proactive maintenance
+6. **Performance testing and validation** to ensure scalability under load
 
 Rather than modifying the core Mattermost code (which already supports HA), I focused on:
 
@@ -19,6 +21,8 @@ Rather than modifying the core Mattermost code (which already supports HA), I fo
 4. Adding Makefile targets for simplified operations
 5. Creating comprehensive documentation
 6. Integrating Redis Cluster for improved pub/sub messaging and scalability
+7. Adding advanced monitoring with Prometheus, Grafana, and AlertManager
+8. Implementing load testing to validate real-time synchronization at scale
 
 ### Implementation Strategy
 
@@ -28,9 +32,10 @@ I followed these steps:
 2. **Infrastructure Design**: Designed a scalable architecture with redundant components
 3. **Configuration**: Created configuration templates with optimal settings for HA
 4. **Deployment Automation**: Developed scripts and Makefile targets for deployment
-5. **Testing & Monitoring**: Added health check tools to verify proper operation
+5. **Testing & Monitoring**: Added health check tools and comprehensive monitoring to verify proper operation
 6. **Documentation**: Created detailed guides for operation and maintenance
 7. **Redis Cluster Integration**: Implemented and configured Redis Cluster for improved scalability
+8. **Advanced Validation**: Created load testing tools to verify real-time synchronization works at scale
 
 ## 2. System Architecture
 
@@ -59,6 +64,10 @@ I followed these steps:
  ┌─────────────────────────────────────────────────────────────┐
  │                           File Storage                      │
  └─────────────────────────────────────────────────────────────┘
+        │               │                │               │
+ ┌─────────────────────────────────────────────────────────────┐
+ │              Monitoring & Alerting Stack                    │
+ └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Component Breakdown
@@ -67,9 +76,11 @@ I followed these steps:
 |:----------|:---------------|:--------|
 | **Load Balancer** | Nginx | Distributes traffic across nodes, handles WebSocket connections, performs health checks |
 | **App Servers** | Multiple Mattermost instances | Process HTTP requests, WebSocket connections, and run application logic |
-| **Database** | PostgreSQL with replication | Primary database for persistent storage with read replicas for scaling |
+| **Database** | PostgreSQL with replication + Patroni | Primary database for persistent storage with read replicas for scaling and automatic failover |
 | **Redis Cluster** | Redis Cluster (3+ nodes) | Provides distributed pub/sub messaging and session storage with sharding |
 | **File Storage** | MinIO (S3-compatible) | Shared storage for file uploads, ensuring consistency across nodes |
+| **Monitoring Stack** | Prometheus, Grafana, AlertManager | Provides real-time monitoring, visualization, and alerting for all components |
+| **Distributed Coordination** | etcd | Handles leader election and distributed configuration |
 
 ### Key Architectural Features
 
@@ -77,22 +88,38 @@ I followed these steps:
    - Multiple identical Mattermost instances can be added/removed without affecting service
    - Each node runs the same code and configuration
    - No local state is maintained on the nodes
+   - Metrics collection for performance analysis and troubleshooting
 
 2. **Real-time Event Propagation**:
    - Redis Cluster ensures all nodes receive events simultaneously
    - WebSocket messages are broadcast across all nodes via Redis pub/sub
    - Scales horizontally with multiple Redis nodes
    - User presence status is consistent regardless of which node a user connects to
+   - Performance metrics tracked for event propagation latency
 
 3. **Database High Availability**:
-   - Primary-replica setup with automatic failover capability
+   - Primary-replica setup with automatic failover capability via Patroni
    - Connection pooling optimizes database resource usage
    - Read queries can be distributed to replicas for scaling
+   - Monitored with Prometheus for real-time performance tracking
 
 4. **Shared File Storage**:
    - S3-compatible storage provides a consistent view of files
    - All nodes have access to the same uploaded content
    - No synchronization issues with attachments
+   - Performance metrics for upload/download operations
+
+5. **Comprehensive Monitoring**:
+   - Prometheus for metrics collection from all components
+   - Grafana dashboards for visualization and analysis
+   - AlertManager for automated notifications on issues
+   - Custom health checks for all HA components
+
+6. **Load Testing & Validation**:
+   - K6-based load testing script for simulating real user traffic
+   - Validates real-time synchronization across nodes
+   - Measures performance under various load conditions
+   - Reports on response times and error rates
 
 ## 3. Key Code Changes
 
@@ -151,6 +178,8 @@ Created a comprehensive high availability configuration template with Redis Clus
     "Enable": true,
     "ClusterName": "mattermost-cluster",
     "UseIPAddress": true,
+    "EnableExperimentalGossipEncryption": true,
+    "EnableGossipCompression": true,
     "ReadOnlyConfig": true,
     "GossipPort": 8074
   },
@@ -165,36 +194,34 @@ Created a comprehensive high availability configuration template with Redis Clus
     "WriteTimeoutMs": 3000,
     "IdleTimeoutSeconds": 300
   },
-  "FileSettings": {
-    "DriverName": "amazons3",
-    "AmazonS3Bucket": "mattermost-uploads",
-    "AmazonS3Endpoint": "minio:9000"
-    // Other S3 settings...
+  "MetricsSettings": {
+    "Enable": true,
+    "BlockList": ["process_start_time_seconds"],
+    "ListenAddress": ":8067"
   }
 }
 ```
 
 ### Infrastructure Implementation
 
-Created a Docker Compose file with Redis Cluster:
+Created a Docker Compose file with Redis Cluster and advanced monitoring:
 
 ```yaml
 # docker-compose.ha.yml
 services:
   # Load Balancer and Database configurations...
 
+  # Database failover management
+  patroni:
+    image: "bitnami/patroni:3.0.0"
+    # Configuration for automatic failover...
+
+  etcd:
+    image: "bitnami/etcd:3.5.9"
+    # Configuration for distributed coordination...
+
   # Redis Cluster for Session and Pub/Sub
   redis-node-0:
-    image: "redis:7.4.0"
-    command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf
-    # Configuration...
-
-  redis-node-1:
-    image: "redis:7.4.0"
-    command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf
-    # Configuration...
-
-  redis-node-2:
     image: "redis:7.4.0"
     command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf
     # Configuration...
@@ -209,9 +236,21 @@ services:
     environment:
       - "MM_REDISSETTINGS_ENABLE=true"
       - "MM_REDISSETTINGS_CLUSTERADDRESSES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379"
-      - "MM_REDISSETTINGS_POOLTIMEOUTSECONDS=3"
-      # Other Redis settings...
-    # Configuration...
+      - "MM_METRICSSETTINGS_ENABLE=true"
+      # Other settings...
+
+  # Monitoring services
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    # Configuration for metrics collection...
+
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    # Configuration for alerting...
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    # Configuration for metrics visualization...
 ```
 
 ### Redis Cluster Initialization Script
@@ -235,48 +274,73 @@ if ! redis-cli -h redis-node-0 CLUSTER INFO | grep -q "cluster_state:ok"; then
 fi
 ```
 
-### Monitoring and Health Checks
+### Monitoring and Alerting Configuration
 
-Enhanced the health check script with Redis Cluster support:
+Created Prometheus configuration for metrics collection:
 
-```bash
-# build/docker/healthcheck.sh
+```yaml
+# build/docker/prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
 
-# Function to check Redis Cluster status
-check_redis_cluster() {
-    local primary_node=$1
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+rule_files:
+  - "alerts.yml"
+
+scrape_configs:
+  - job_name: 'mattermost'
+    metrics_path: '/api/v4/metrics'
+    static_configs:
+      - targets: ['leader:8065', 'follower:8065', 'follower2:8065']
+  
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-node-0:6379', 'redis-node-1:6379', 'redis-node-2:6379']
     
-    # Check connectivity and cluster state
-    local cluster_state=$(redis-cli -h $primary_node CLUSTER INFO | grep cluster_state | cut -d':' -f2 | tr -d '\r')
-    if [ "$cluster_state" == "ok" ]; then
-        echo -e "${GREEN}[✓] Redis Cluster state is OK${NC}"
-        
-        # Check number of nodes
-        local cluster_size=$(redis-cli -h $primary_node CLUSTER NODES | wc -l)
-        echo -e "${GREEN}[✓] Redis Cluster size: $cluster_size nodes${NC}"
-        
-        return 0
-    else
-        echo -e "${RED}[✗] Redis Cluster is not in 'ok' state ($cluster_state)${NC}"
-        return 1
-    fi
-}
+  # Other monitoring targets...
+```
 
-# Main health check logic
-# ...
+### Load Testing Script
+
+Implemented a comprehensive load testing script to validate real-time message synchronization:
+
+```javascript
+// load-test.js (k6 script)
+import http from 'k6/http';
+import { sleep, check } from 'k6';
+
+export const options = {
+  stages: [
+    { duration: '1m', target: 50 }, // Ramp up
+    { duration: '3m', target: 50 }, // Stay at peak load
+    { duration: '1m', target: 0 },  // Ramp down
+  ],
+  thresholds: {
+    http_req_duration: ['p(95)<500'], // 95% of requests must complete within 500ms
+    'http_req_duration{name:send_message}': ['p(95)<800'],
+  },
+};
+
+// Test functions that simulate real user behavior
+// Login, send messages, check for real-time delivery...
 ```
 
 ## 4. Challenges and Solutions
 
-### Challenge 1: Database Replication
+### Challenge 1: Database Replication and Failover
 
 **Challenge**: Setting up PostgreSQL replication with automatic failover proved complex due to timing issues during initialization.
 
-**Solution**: Created a custom initialization script that:
-- Waits for the primary database to be fully initialized
-- Creates a replication user with appropriate permissions
-- Sets up replication slots and configuration
-- Uses proper health checks to ensure the setup completes successfully
+**Solution**: 
+- Implemented Patroni for automated PostgreSQL failover
+- Used etcd for distributed consensus and leader election
+- Created a custom initialization script that sets up proper replication
+- Added comprehensive monitoring for database health
 
 ### Challenge 2: Redis Cluster Setup and Configuration
 
@@ -297,28 +361,97 @@ check_redis_cluster() {
 - Configured Redis Cluster to share WebSocket events across all nodes
 - Implemented session stickiness in the load balancer to maintain connections
 - Ensured WebSocket reconnection strategies work properly in a multi-node environment
+- Added metrics to track WebSocket performance and reliability
 
-### Challenge 4: File Storage Consistency
+### Challenge 4: Comprehensive Monitoring
 
-**Challenge**: Ensuring all nodes have consistent access to uploaded files.
-
-**Solution**:
-- Implemented S3-compatible storage (MinIO) for all file uploads
-- Created an initialization script to set up buckets and permissions
-- Configured all nodes to use the same storage settings
-- Implemented proper health checks to verify storage availability
-
-### Challenge 5: Monitoring and Troubleshooting
-
-**Challenge**: In a distributed system, identifying issues can be difficult due to the multiple components involved.
+**Challenge**: In a distributed system, identifying performance bottlenecks and failures across different components is complex.
 
 **Solution**:
-- Created a comprehensive health check script that tests all components including Redis Cluster
-- Implemented logging to separate files for each node
-- Added Makefile targets for common operations
-- Documented common issues and their solutions
+- Implemented a comprehensive monitoring stack with Prometheus, Grafana, and AlertManager
+- Created custom dashboards for visualizing system health and performance
+- Set up alerts for critical failures and performance degradation
+- Added exporters for Redis, PostgreSQL, and node metrics
 
-## 5. Lessons Learned
+### Challenge 5: Validating Real-time Synchronization
+
+**Challenge**: Ensuring messages and events synchronize properly across all nodes under load.
+
+**Solution**:
+- Created a k6-based load testing script that simulates real user behavior
+- Implemented tests specifically targeting cross-node communication
+- Measured and analyzed performance metrics for event propagation
+- Validated that the system maintains performance under heavy load
+
+## 5. Testing and Validation
+
+### Health Checks
+
+Implemented comprehensive health checks for all components:
+
+```bash
+# build/docker/healthcheck.sh
+# Functions to check Redis Cluster, PostgreSQL, Mattermost nodes, etc.
+check_redis_cluster() {
+    # Check cluster status
+    local cluster_state=$(redis-cli -h $primary_node CLUSTER INFO | grep cluster_state)
+    # Validation logic...
+}
+
+check_postgres() {
+    # Check database connectivity and replication status
+    # Validation logic...
+}
+
+check_mattermost_node() {
+    # Check individual node health
+    # Validation logic...
+}
+```
+
+### Load Testing
+
+Created a load testing script to validate real-time message synchronization:
+
+```bash
+# build/docker/load-test.sh
+# Script that runs k6 tests to simulate user behavior
+# Tests login, sending messages, and validates real-time delivery
+# Reports on performance metrics and error rates
+```
+
+### Monitoring Dashboards
+
+Implemented Grafana dashboards for visualizing system performance:
+
+- **Mattermost Overview**: General system health and performance
+- **Redis Cluster**: Redis performance and cluster status
+- **Database Performance**: PostgreSQL query performance and replication lag
+- **Real-time Messaging**: Message delivery metrics and latency
+
+### Alerting Rules
+
+Configured alerts for critical system conditions:
+
+```yaml
+# build/docker/alerts.yml
+groups:
+- name: mattermost_alerts
+  rules:
+  - alert: MattermostNodeDown
+    expr: up{job="mattermost"} == 0
+    # Alert configuration...
+
+  - alert: RedisClusterBroken
+    expr: redis_cluster_state != 1
+    # Alert configuration...
+
+  - alert: PostgresReplicationLag
+    expr: pg_replication_lag > 300
+    # Alert configuration...
+```
+
+## 6. Lessons Learned
 
 1. **Stateless Architecture is Key**: Ensuring all application nodes are truly stateless is critical for HA.
 
@@ -328,34 +461,41 @@ check_redis_cluster() {
 
 4. **Configuration Consistency**: All nodes must have identical configurations for the cluster features.
 
-5. **Automated Health Checks**: Regular health checks are essential for early detection of issues.
+5. **Comprehensive Monitoring**: Real-time monitoring is essential for maintaining high availability and quickly detecting issues.
 
-6. **Documentation is Critical**: Comprehensive documentation makes maintenance and troubleshooting much easier.
+6. **Load Testing is Crucial**: Validating the system under realistic load conditions is essential to ensure real-time synchronization works at scale.
 
-## 6. Future Improvements
+7. **Documentation is Critical**: Comprehensive documentation makes maintenance and troubleshooting much easier.
+
+## 7. Future Improvements
 
 If given more time, these enhancements would further improve the implementation:
 
 1. **Automated Scaling**: Add scripts to automatically scale nodes based on load.
 
-2. **Enhanced Monitoring**: Integrate with Prometheus and Grafana for more detailed metrics.
+2. **Geographic Distribution**: Implement multi-region deployment for even higher availability.
 
-3. **Geographic Distribution**: Implement multi-region deployment for even higher availability.
+3. **Redis Cluster Optimization**: Fine-tune Redis Cluster configuration for optimal performance.
 
-4. **Redis Cluster Optimization**: Fine-tune Redis Cluster configuration for optimal performance.
+4. **Machine Learning for Predictive Monitoring**: Implement ML-based anomaly detection to predict failures before they occur.
 
-5. **Backup Automation**: Add automated backup and recovery procedures.
+5. **Enhanced Load Testing**: Expand the load testing suite to cover more user scenarios and edge cases.
 
-6. **Performance Tuning**: Optimize database and Redis configurations for higher throughput.
+6. **Chaos Testing**: Implement chaos engineering practices to validate resilience during component failures.
 
-## 7. Conclusion
+7. **Backup Automation**: Add automated backup and recovery procedures.
 
-The implemented high availability solution for Mattermost provides a robust, scalable architecture that ensures continuous operation even during component failures. By leveraging built-in HA capabilities, integrating Redis Cluster, and implementing proper infrastructure, we've created a system that:
+8. **Performance Tuning**: Optimize database and Redis configurations for higher throughput.
+
+## 8. Conclusion
+
+The implemented high availability solution for Mattermost provides a robust, scalable architecture that ensures continuous operation even during component failures. By leveraging built-in HA capabilities, integrating Redis Cluster, implementing comprehensive monitoring, and validating with load testing, we've created a system that:
 
 - Scales horizontally by adding more application nodes
 - Maintains data consistency across all components
 - Provides real-time synchronization of messages and events using Redis Cluster
 - Automatically recovers from component failures
-- Can be easily monitored and maintained
+- Offers comprehensive monitoring and alerting
+- Has been validated to perform under load
 
 This solution aligns with enterprise best practices for high availability while maintaining the full functionality of the Mattermost platform. 

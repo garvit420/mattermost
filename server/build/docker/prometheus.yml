@@ -1,18 +1,50 @@
 global:
-  scrape_interval: 5s
-  evaluation_interval: 60s
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+rule_files:
+  - "alerts.yml"
 
 scrape_configs:
-  - job_name: 'mattermost'
+  - job_name: 'prometheus'
     static_configs:
-      - targets: ['host.docker.internal:8067']
-  - job_name: fmetrics_scrape
-    docker_sd_configs:
-      - host: unix:///var/run/docker.sock
-        refresh_interval: 5s
+      - targets: ['localhost:9090']
+
+  - job_name: 'mattermost'
+    metrics_path: '/api/v4/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['leader:8065', 'follower:8065', 'follower2:8065']
+    basic_auth:
+      username: 'prometheus'
+      password: 'prometheus_password'
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-node-0:6379', 'redis-node-1:6379', 'redis-node-2:6379']
+    metrics_path: /metrics
     relabel_configs:
-      - source_labels: ['__meta_docker_container_name']
-        regex: '/(.*)'
-        target_label: 'container'
-      - source_labels: ['__meta_docker_container_log_stream']
-        target_label: 'logstream'
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: redis-exporter:9121
+
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    metrics_path: /metrics
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']

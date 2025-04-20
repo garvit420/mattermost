@@ -1,0 +1,116 @@
+groups:
+- name: mattermost_alerts
+  rules:
+  - alert: MattermostNodeDown
+    expr: up{job="mattermost"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Mattermost node down"
+      description: "Mattermost node {{ $labels.instance }} has been down for more than 1 minute."
+
+  - alert: MattermostHighResponseTime
+    expr: histogram_quantile(0.95, rate(mattermost_api_time_seconds_bucket[5m])) > 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Mattermost high response time"
+      description: "95th percentile of API response time is above 1 second for instance {{ $labels.instance }}."
+
+  - alert: MattermostHighErrorRate
+    expr: rate(mattermost_http_errors_total[5m]) / rate(mattermost_http_requests_total[5m]) > 0.05
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Mattermost high error rate"
+      description: "Error rate is above 5% for instance {{ $labels.instance }}."
+
+- name: redis_alerts
+  rules:
+  - alert: RedisNodeDown
+    expr: up{job="redis"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Redis node down"
+      description: "Redis node {{ $labels.instance }} has been down for more than 1 minute."
+
+  - alert: RedisClusterBroken
+    expr: redis_cluster_state != 1
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Redis cluster broken"
+      description: "Redis cluster is not in OK state on node {{ $labels.instance }}."
+
+  - alert: RedisHighMemoryUsage
+    expr: redis_memory_used_bytes / redis_memory_max_bytes * 100 > 80
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Redis high memory usage"
+      description: "Redis memory usage is above 80% on {{ $labels.instance }}."
+
+- name: postgres_alerts
+  rules:
+  - alert: PostgresNodeDown
+    expr: up{job="postgres"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "PostgreSQL node down"
+      description: "PostgreSQL node {{ $labels.instance }} has been down for more than 1 minute."
+
+  - alert: PostgresReplicationLag
+    expr: pg_replication_lag > 300
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "PostgreSQL replication lag"
+      description: "PostgreSQL replication lag is over 5 minutes on {{ $labels.instance }}."
+
+  - alert: PostgresHighConnections
+    expr: pg_stat_activity_count / pg_settings_max_connections * 100 > 80
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "PostgreSQL high connection usage"
+      description: "PostgreSQL connection usage is above 80% on {{ $labels.instance }}."
+
+- name: node_alerts
+  rules:
+  - alert: HighCPULoad
+    expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High CPU load"
+      description: "CPU load is above 80% on {{ $labels.instance }}."
+
+  - alert: HighMemoryUsage
+    expr: (node_memory_MemTotal_bytes - node_memory_MemFree_bytes - node_memory_Buffers_bytes - node_memory_Cached_bytes) / node_memory_MemTotal_bytes * 100 > 80
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High memory usage"
+      description: "Memory usage is above 80% on {{ $labels.instance }}."
+
+  - alert: HighDiskUsage
+    expr: node_filesystem_avail_bytes / node_filesystem_size_bytes * 100 < 20
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High disk usage"
+      description: "Disk usage is above 80% on {{ $labels.instance }} mount {{ $labels.mountpoint }}." 
